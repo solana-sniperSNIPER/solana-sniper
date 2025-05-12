@@ -1,92 +1,76 @@
 const axios = require('axios');
 const fs = require('fs');
-const path = require('path');
+const { exec } = require('child_process');
 
-// Inputs from CLI
-const MINT = process.argv[2];
-const TARGET_CAP = parseFloat(process.argv[3]) || 50;
-const STOP_LOSS_CAP = parseFloat(process.argv[4]) || 8;
+// Load wallet & API key
+const wallet = JSON.parse(fs.readFileSync('sniper-wallet.json', 'utf8'));
+const mint = process.argv[2];
+const targetCap = parseFloat(process.argv[3]);
+const stopLossCap = parseFloat(process.argv[4]);
 
-const API_KEY = '5dk3grbu6n152db3at0q8tjq64tp4dkk6xrmrdamdwr4ymbu9dcp2bu8e95mrgj7dx24rv3hdnmket379xr7jnbk60umjtv8att5jtu9axqmmjtbf9b7eja4c9qnakvuc526aykp84ykua9a6ejht9tr3evvk6nmq8kkq84drr36kj36tu3gdve8gtprrjmcd34acuuatkkuf8';
-const TELEGRAM_BOT_TOKEN = '7871990997:AAF2Btzipsbdsl0HlmD1zdMvdKM8y1fiiL0';
-const TELEGRAM_CHAT_ID = '1370133617';
+if (!mint || isNaN(targetCap) || isNaN(stopLossCap)) {
+  console.error('❌ Usage: node monitorAndSell.js <mint> <targetCap> <stopLossCap>');
+  process.exit(1);
+}
 
-// Send Telegram alert
-async function sendTelegram(text) {
+console.log(`📊 Monitoring ${mint} until cap hits ${targetCap} or drops below ${stopLossCap} SOL...`);
+
+async function getMarketCap() {
   try {
-    await axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      chat_id: TELEGRAM_CHAT_ID,
-      text: text,
-    });
+    const res = await axios.get(`https://pumpportal.fun/api/token/${mint}`);
+    return res.data.marketCapSol;
   } catch (err) {
-    console.error("❌ Telegram error:", err.message);
+    console.log('⚠️ Error checking cap:', err.response?.statusText || err.message);
+    return null;
   }
 }
 
-// Log to CSV
-function logSell(mint, txid, cap, reason) {
-  const logLine = `${new Date().toISOString()},SELL,${mint},${cap},https://solscan.io/tx/${txid},${reason}\n`;
-  fs.appendFileSync(path.join(__dirname, 'sniper_logs.csv'), logLine);
-}
-
-// Remove sold token from active list
-function removeFromActiveTokens(mint) {
-  const filePath = path.join(__dirname, 'active_tokens.json');
-  if (!fs.existsSync(filePath)) return;
-
+async function sellToken() {
   try {
-    const tokens = JSON.parse(fs.readFileSync(filePath));
-    const filtered = tokens.filter(t => t.mint !== mint);
-    fs.writeFileSync(filePath, JSON.stringify(filtered, null, 2));
-    console.log(`🧹 Removed ${mint} from active_tokens.json`);
-  } catch (e) {
-    console.error("❌ Failed to update active_tokens.json:", e.message);
+    const res = await axios.post(
+      'https://pumpportal.fun/api/sell',
+      {
+        mint,
+        apiKey: wallet.apiKey,
+        walletPublicKey: wallet.walletPublicKey,
+        privateKey: wallet.privateKey,
+      }
+    );
+
+    if (res.data.signature) {
+      console.log(`💸 Sold ${mint}! TX: https://solscan.io/tx/${res.data.signature}`);
+      return true;
+    } else {
+      console.error('❌ Sell failed:', res.data);
+    }
+  } catch (err) {
+    console.error('❌ Sell request error:', err.message);
   }
+  return false;
 }
 
-// Auto-sell logic
-async function sell(reason) {
-  const sell = await axios.post(`https://pumpportal.fun/api/trade?api-key=${API_KEY}`, {
-    action: 'sell',
-    mint: MINT,
-    amount: 100,
-    denominatedInSol: false,
-    slippage: 10,
-    pool: 'pump',
-    priorityFee: 0.00005
-  }, {
-    headers: { 'Content-Type': 'application/json' }
-  });
-
-  const txid = sell.data.signature;
-  const txLink = `https://solscan.io/tx/${txid}`;
-  logSell(MINT, txid, '-', reason);
-  await sendTelegram(`🚨 AUTO-SELL (${reason})\nTX: ${txLink}`);
-  removeFromActiveTokens(MINT);
-  console.log(`✅ Sold (${reason}): ${txLink}`);
-  process.exit();
-}
-
-// Monitor loop
-async function checkMarketCap() {
-  try {
-    const res = await axios.get(`https://pumpportal.fun/api/token/${MINT}`);
-    const token = res.data;
-    const cap = token.marketCapSol;
-    console.log(`🔍 [${MINT.slice(0,6)}...] Cap: ${cap} SOL`);
-
-    if (cap >= TARGET_CAP) {
-      await sell(`target cap reached (${cap})`);
+(async () => {
+  while (true) {
+    const cap = await getMarketCap();
+    if (cap === null) {
+      await new Promise((r) => setTimeout(r, 5000));
+      continue;
     }
 
-    if (cap <= STOP_LOSS_CAP) {
-      await sell(`stop-loss triggered (${cap})`);
+    console.log(`🔎 Current Market Cap: ${cap.toFixed(2)} SOL`);
+
+    if (cap >= targetCap) {
+      console.log('🚀 Target cap reached! Selling...');
+      const success = await sellToken();
+      if (success) break;
     }
 
-  } catch (err) {
-    console.error("⚠️ Error checking cap:", err.message);
-  }
-}
+    if (cap <= stopLossCap) {
+      console.log('🔻 Stop-loss hit. Selling...');
+      const success = await sellToken();
+      if (success) break;
+    }
 
-setInterval(checkMarketCap, 15000);
-checkMarketCap();
+    await new Promise((r) => setTimeout(r, 15000)); // wait 15s
+  }
+})();

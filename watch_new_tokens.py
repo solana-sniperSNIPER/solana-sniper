@@ -2,102 +2,68 @@ import asyncio
 import websockets
 import json
 import subprocess
-import time
 import requests
-import os
-import tempfile
-import shutil
+import time
 
-TELEGRAM_BOT_TOKEN = '7871990997:AAF2Btzipsbdsl0HlmD1zdMvdKM8y1fiiL0'
-TELEGRAM_CHAT_ID = '1370133617'
+WALLET = json.load(open("sniper-wallet.json"))
+BUY_THRESHOLD_SOL = 0.001
 
-sniped_mints = set()
-token_trade_counts = {}
-
-def log_active_token(mint, target_cap, stop_loss_cap):
-    filepath = "active_tokens.json"
-    tokens = []
-
-    if os.path.exists(filepath):
-        try:
-            with open(filepath, "r") as f:
-                tokens = json.load(f)
-        except:
-            tokens = []
-
-    tokens.append({
-        "mint": mint,
-        "target_cap": target_cap,
-        "stop_loss_cap": stop_loss_cap
-    })
-
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=".") as tmp:
-        json.dump(tokens, tmp, indent=2)
-        temp_name = tmp.name
-
-    shutil.move(temp_name, filepath)
-
-async def monitor_volume_and_sell(mint, name, symbol):
-    await asyncio.sleep(30)
-    count = token_trade_counts.get(mint, 0)
-
-    if count < 2:
-        print(f"🔁 Low volume detected for {symbol} — auto-selling...")
-        subprocess.Popen(["node", "monitorAndSell.js", mint, "3", "0.5"])  # emergency cap and stop
-    else:
-        # continue standard sell tracking
-        log_active_token(mint, "50", "8")
-        subprocess.Popen(["node", "monitorAndSell.js", mint, "50", "8"])
-
-async def handle_token(mint, name, symbol, price, vSol):
-    if mint in sniped_mints:
-        return
-
-    if price >= 0.001 or vSol < 1.5:
-        return
-
-    print(f"🚀 Instant-buying {symbol} with {vSol:.2f} vSol")
-    sniped_mints.add(mint)
-
+def snipe_token(mint):
+    url = "https://pumpportal.fun/api/buy"
+    payload = {
+        "apiKey": WALLET["apiKey"],
+        "walletPublicKey": WALLET["walletPublicKey"],
+        "privateKey": WALLET["privateKey"],
+        "mint": mint
+    }
     try:
-        subprocess.run(["node", "snipeViaAPI.js", mint])
-        token_trade_counts[mint] = 0
-        asyncio.create_task(monitor_volume_and_sell(mint, name, symbol))
+        res = requests.post(url, json=payload)
+        data = res.json()
+        print(f"🔎 Full API response: {json.dumps(data, indent=2)}")
+        if "signature" in data:
+            print(f"✅ Snipe sent! TX ID: https://solscan.io/tx/{data['signature']}")
+            auto_monitor(mint)
+        else:
+            print("⚠️ No transaction ID returned. Something may have failed silently.")
     except Exception as e:
-        print(f"❌ Failed to snipe {symbol}: {e}")
+        print(f"❌ Failed to snipe {mint}: {e}")
 
-async def main():
+def auto_monitor(mint, tp_mult=2.0, sl_mult=0.5):
+    try:
+        token_info = requests.get(f"https://pumpportal.fun/api/token/{mint}").json()
+        cap = float(token_info.get("marketCapSol", 0))
+        if cap > 0:
+            target = round(cap * tp_mult, 2)
+            stop = round(cap * sl_mult, 2)
+            print(f"📈 Launching auto-monitor for {mint} | Target: {target} | Stop: {stop}")
+            subprocess.Popen(["node", "monitorAndSell.js", mint, str(target), str(stop)])
+        else:
+            print("⚠️ Initial market cap not found. Skipping auto-monitor.")
+    except Exception as e:
+        print(f"⚠️ Couldn't fetch market cap for {mint}: {e}")
+
+async def subscribe():
     uri = "wss://pumpportal.fun/api/data"
+    async with websockets.connect(uri) as ws:
+        await ws.send(json.dumps({ "method": "subscribeNewToken" }))
 
-    async with websockets.connect(uri) as websocket:
-        await websocket.send(json.dumps({"method": "subscribeNewToken"}))
-        await websocket.send(json.dumps({"method": "subscribeTokenTrade", "keys": []}))
-        print("📡 Sniper Phase 1 Live: Instant Buy + Volume Exit")
-
-        async for message in websocket:
+        while True:
+            msg = await ws.recv()
             try:
-                data = json.loads(message)
-                if "txType" in data and data["txType"] == "create":
-                    mint = data.get("mint", "").replace("pump", "")
-                    name = data.get("name", "Unknown")
-                    symbol = data.get("symbol", "")
-                    solAmount = data.get("solAmount", 0)
-                    initialBuy = data.get("initialBuy", 0)
-                    vSol = data.get("vSolInBondingCurve", 0)
-
-                    if solAmount == 0 or initialBuy == 0:
-                        continue
-
-                    price = solAmount / initialBuy
-                    asyncio.create_task(handle_token(mint, name, symbol, price, vSol))
-
-                elif "txType" in data and data["txType"] == "buy":
-                    mint = data.get("mint", "").replace("pump", "")
-                    if mint not in token_trade_counts:
-                        token_trade_counts[mint] = 0
-                    token_trade_counts[mint] += 1
-
+                data = json.loads(msg)
+                if "mint" in data and "vSolInBondingCurve" in data:
+                    mint = data["mint"]
+                    price = float(data["vSolInBondingCurve"]) / float(data["vTokensInBondingCurve"])
+                    if price < BUY_THRESHOLD_SOL:
+                        print("🚨 NEW TOKEN FOUND under $0.001!")
+                        print(f"Name: {data.get('name', 'Unknown')}")
+                        print(f"Symbol: {data.get('symbol', 'Unknown')}")
+                        print(f"Mint Address: {mint}")
+                        print(f"Price: {price:.8f} SOL\n---")
+                        snipe_token(mint)
             except Exception as e:
-                print("⚠️ Error:", e)
+                print(f"⚠️ Failed to parse token event: {e}")
+                print("🔧 RAW MESSAGE RECEIVED:")
+                print(msg)
 
-asyncio.run(main())
+asyncio.run(subscribe())
