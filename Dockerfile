@@ -1,23 +1,21 @@
-# Use Node.js and Python base
+# Use a Node base image
 FROM node:18
 
-# Install Python 3 and pip
+# Install Python and pip
 RUN apt update && apt install -y python3 python3-pip
 
-# Create working directory
+# Set working directory
 WORKDIR /app
 
 # Copy everything
 COPY . .
 
-# Install Node.js dependencies
+# Install dependencies
 RUN npm install
-
-# Install Python dependencies
 RUN pip3 install -r requirements.txt || true
 
-# Expose port for Koyeb health check
+# Expose dummy port for Koyeb health check
 EXPOSE 8000
 
-# Run keepalive and sniper script
+# Run keepalive server and Python bot
 CMD ["./start.sh"]

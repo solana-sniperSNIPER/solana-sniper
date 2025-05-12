@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Start the dummy web server in the background
+# Start dummy HTTP server for Koyeb health check
 node keepalive.js &
 
 # Start your sniper bot
