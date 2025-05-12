@@ -1,21 +1,26 @@
-# Use a Node base image
-FROM node:18
+# Use Python base
+FROM python:3.10-slim
 
-# Install Python and pip
-RUN apt update && apt install -y python3 python3-pip
+# Install Node.js + pip + other tools
+RUN apt update && apt install -y curl gnupg && \
+    curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
+    apt install -y nodejs && \
+    apt clean
 
 # Set working directory
 WORKDIR /app
 
-# Copy everything
+# Copy files
 COPY . .
 
-# Install dependencies
-RUN npm install
-RUN pip3 install -r requirements.txt || true
+# Install Python packages
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Expose dummy port for Koyeb health check
+# Install Node packages (for Telegram bot, etc)
+RUN npm install || true
+
+# Expose port for Koyeb health check
 EXPOSE 8000
 
-# Run keepalive server and Python bot
+# Run both sniper and dummy server
 CMD ["./start.sh"]
