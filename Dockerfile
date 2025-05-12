@@ -17,4 +17,5 @@ RUN pip3 install -r requirements.txt
 RUN npm install
 
 # Start the sniper
-CMD ["python3", "watch_new_tokens.py"]
+CMD ["./start.sh"]
+
